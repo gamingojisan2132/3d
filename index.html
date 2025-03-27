@@ -1,0 +1,719 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Three.js Voxel Scene with Enemies</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #3399FF; }
+        canvas { display: block; }
+        #blocker { position: absolute; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; }
+        #instructions { width: 50%; cursor: pointer; background-color: white; padding: 20px; text-align: center; border-radius: 5px; font-family: sans-serif; }
+    </style>
+</head>
+<body>
+    <div id="blocker">
+        <div id="instructions">
+            <p style="font-size:24px; font-weight: bold;">クリックして開始</p>
+            <p>WASD: 移動<br/>スペース: ジャンプ<br/>マウス: 視点移動<br/>クリック: ボールを発射<br/>ESC: 操作解除</p>
+        </div>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+            "cannon-es": "https://unpkg.com/cannon-es@0.20.0/dist/cannon-es.js"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import * as CANNON from 'cannon-es';
+        // import CannonDebugger from 'cannon-es-debugger'; // Optional
+
+        // --- Global Variables ---
+        let scene, camera, renderer;
+        let world, groundBody, groundMaterial, playerMaterial, ballPhysicsMaterial, enemyMaterial;
+        let controls, playerBody, playerHeight = 1.8, playerMass = 70, playerRadius = 0.4;
+        let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false, canJump = false;
+        let moveSpeed = 10;
+        let enemySpeed = 2;
+        let meshes = [], bodies = [], enemies = [], balls = [];
+        let timeStep = 1 / 60;
+        let ballGeometry, ballMeshMaterial, ballShape;
+        let shootDirectionCANNON = new CANNON.Vec3();
+        let playerCollisionGroup = 1, enemyCollisionGroup = 2, ballCollisionGroup = 4;
+        const jumpVelocity = 21;
+        
+        // テクスチャローダーと敵のテクスチャ
+        const textureLoader = new THREE.TextureLoader();
+        const enemyTexture = textureLoader.load('assets/images/man.png');
+        const billboardObjects = [];
+        
+        // GLTFローダーを追加
+        const gltfLoader = new GLTFLoader();
+        // 羊のモデルを保存する変数
+        let sheepModel = null;
+        // アセット読み込み状態を管理
+        const assetsToLoad = {
+            sheepModel: false
+        };
+        
+        // 物理演算の更新頻度を下げる（3フレームに1回更新）
+        let physicsUpdateCounter = 0;
+        const physicsUpdateFrequency = 3;
+        
+        // LOD管理用の変数
+        const LOD_DISTANCE = 50; // この距離以上のオブジェクトは詳細度を下げる
+        const LOD_DISTANCE_FAR = 100; // この距離以上のオブジェクトは非表示にする
+        let dynamicObjects = []; // 動的に管理するオブジェクト
+        
+        // --- Initialization ---
+        function init() {
+            console.log("Initializing...");
+            try {
+                initThree();
+                initCannon();
+                initPointerLock(); // ここで controls が初期化されるはず
+                createEnvironment();
+                createPlayer();
+                createLights();
+                console.log("Initialization complete. Starting animation loop.");
+                animate(); // animate開始
+            } catch (error) {
+                console.error("Initialization failed:", error);
+                displayError("初期化中にエラーが発生しました。コンソールを確認してください。");
+            }
+        }
+
+        // --- Three.js Setup --- (unchanged)
+        function initThree() { console.log("Initializing Three.js..."); scene = new THREE.Scene(); scene.background = new THREE.Color(0x3399FF); scene.fog = new THREE.Fog(0x3399FF, 30, 120); camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000); camera.position.y = playerHeight; renderer = new THREE.WebGLRenderer({ antialias: true }); renderer.setSize(window.innerWidth, window.innerHeight); renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap; document.body.appendChild(renderer.domElement); window.addEventListener('resize', onWindowResize); console.log("Three.js initialized."); }
+
+        // --- Cannon.js (Physics) Setup --- (unchanged)
+        function initCannon() { console.log("Initializing Cannon.js..."); world = new CANNON.World(); world.gravity.set(0, -25, 0); world.broadphase = new CANNON.SAPBroadphase(world); world.allowSleep = true; groundMaterial = new CANNON.Material("ground"); playerMaterial = new CANNON.Material("player"); ballPhysicsMaterial = new CANNON.Material("ball"); enemyMaterial = new CANNON.Material("enemy"); const playerGround = new CANNON.ContactMaterial(groundMaterial, playerMaterial, { friction: 0.3, restitution: 0.0 }); const ballGround = new CANNON.ContactMaterial(groundMaterial, ballPhysicsMaterial, { friction: 0.4, restitution: 0.6 }); const ballPlayer = new CANNON.ContactMaterial(playerMaterial, ballPhysicsMaterial, { friction: 0.1, restitution: 0.3 }); const ballBall = new CANNON.ContactMaterial(ballPhysicsMaterial, ballPhysicsMaterial, { friction: 0.5, restitution: 0.9 }); const enemyGround = new CANNON.ContactMaterial(groundMaterial, enemyMaterial, { friction: 0.3, restitution: 0.1 }); const enemyPlayer = new CANNON.ContactMaterial(playerMaterial, enemyMaterial, { friction: 0, restitution: 0.5 }); const ballEnemy = new CANNON.ContactMaterial(ballPhysicsMaterial, enemyMaterial, { friction: 0.1, restitution: 0.1 }); world.addContactMaterial(playerGround); world.addContactMaterial(ballGround); world.addContactMaterial(ballPlayer); world.addContactMaterial(ballBall); world.addContactMaterial(enemyGround); world.addContactMaterial(enemyPlayer); world.addContactMaterial(ballEnemy); const groundShape = new CANNON.Plane(); groundBody = new CANNON.Body({ mass: 0, material: groundMaterial }); groundBody.addShape(groundShape); groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0); world.addBody(groundBody); 
+            ballGeometry = new THREE.SphereGeometry(0.5, 16, 16);
+            ballMeshMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff });
+            ballShape = new CANNON.Sphere(0.5);
+            console.log("Cannon.js initialized."); }
+
+        // --- Pointer Lock Controls Setup --- (unchanged)
+        function initPointerLock() { console.log("Initializing PointerLockControls..."); controls = new PointerLockControls(camera, document.body); const blocker = document.getElementById('blocker'); const instructions = document.getElementById('instructions'); if (!blocker || !instructions) { console.error("UI elements not found!"); displayError("UI要素が見つかりません"); return; } instructions.addEventListener('click', () => { console.log("Instructions clicked..."); controls.lock(); }); controls.addEventListener('lock', () => { console.log("Pointer locked."); instructions.style.display = 'none'; blocker.style.display = 'none'; }); controls.addEventListener('unlock', () => { console.log("Pointer unlocked."); blocker.style.display = 'flex'; instructions.style.display = ''; moveForward = moveBackward = moveLeft = moveRight = false; if (playerBody) { playerBody.velocity.set(0, 0, 0); playerBody.angularVelocity.set(0, 0, 0); console.log("Player velocity reset on unlock."); } }); scene.add(controls.getObject()); document.addEventListener('keydown', onKeyDown); document.addEventListener('keyup', onKeyUp); document.addEventListener('pointerdown', onPointerDown); console.log("PointerLockControls initialized."); }
+
+        // --- Create Scenery Elements --- (unchanged)
+        function createEnvironment() { 
+            console.log("Creating environment..."); 
+            const groundGeometry = new THREE.PlaneGeometry(300, 300, 50, 50); 
+            const groundMeshMaterial = new THREE.MeshStandardMaterial({ color: 0x77aa77, roughness: 0.9, metalness: 0.1 }); 
+            const groundMesh = new THREE.Mesh(groundGeometry, groundMeshMaterial); 
+            groundMesh.rotation.x = -Math.PI / 2; 
+            groundMesh.receiveShadow = true; 
+            scene.add(groundMesh); 
+            
+            const roadGeometry = new THREE.PlaneGeometry(8, 250); 
+            const roadMaterial = new THREE.MeshStandardMaterial({ color: 0x404040, roughness: 1.0 }); 
+            const roadMesh = new THREE.Mesh(roadGeometry, roadMaterial); 
+            roadMesh.rotation.x = -Math.PI / 2; 
+            roadMesh.position.y = 0.01; 
+            roadMesh.receiveShadow = true; 
+            scene.add(roadMesh); 
+            
+            // 山を1つだけに減らす
+            createMountain(-80, -60, 40, 60); 
+            
+            // 木の数を半分に減らす
+            const treePositions = [{ x: 15, z: -15 }, { x: -25, z: 10 }, { x: -35, z: -40 }, { x: 55, z: 60 }]; 
+            treePositions.forEach(pos => createVoxelTree(pos.x, pos.z)); 
+            
+            // 雲の数を減らして簡略化
+            createSimpleCloud(-50, 70, -80); 
+            createSimpleCloud(60, 90, -100); 
+            
+            console.log("Creating boxes..."); 
+            createBox(5, 1.5, -5, 3, 3, 3); 
+            createBox(-8, 1, 10, 2, 2, 2); 
+            
+            console.log("Creating enemies..."); 
+            createEnemy(-20, 1, 20); 
+            createEnemy(30, 1, -30); 
+            console.log("Enemies created.");
+            
+            // 羊のモデルを1匹だけ配置（非同期読み込み）
+            console.log("Loading sheep model...");
+            loadSheepModel(10, 0, 10);
+            
+            console.log("Environment created."); 
+        }
+        
+        // 簡略化した山の作成関数
+        function createMountain(x, z, radius, height) {
+            // 視覚的な山（メッシュ）
+            const G = new THREE.ConeGeometry(radius, height, 16); 
+            const M = new THREE.MeshStandardMaterial({ 
+                color: new THREE.Color(0x665544).multiplyScalar(Math.random() * 0.1 + 0.9), 
+                roughness: 1.0 
+            }); 
+            const m = new THREE.Mesh(G, M); 
+            m.position.set(x, height / 2 - 0.1, z); 
+            m.castShadow = true; 
+            m.receiveShadow = true; 
+            scene.add(m);
+            
+            // 物理ボディを簡略化（円柱ではなく単純なボックスに）
+            const boxSize = radius * 1.5;
+            const S = new CANNON.Box(new CANNON.Vec3(boxSize / 2, height / 2, boxSize / 2));
+            const B = new CANNON.Body({ mass: 0, material: groundMaterial });
+            B.position.set(x, height / 2, z);
+            B.addShape(S);
+            world.addBody(B);
+            
+            // LOD管理対象に追加
+            dynamicObjects.push({
+                mesh: m,
+                body: B,
+                type: 'mountain',
+                position: new THREE.Vector3(x, height / 2, z),
+                originalScale: new THREE.Vector3(1, 1, 1)
+            });
+        }
+        
+        // 木を簡略化した関数
+        function createVoxelTree(x, z) { 
+            const treeHeight = THREE.MathUtils.randInt(4, 7);
+            const leafSize = THREE.MathUtils.randInt(3, 4); // 葉のサイズを小さくする
+            
+            // 幹を作成
+            const trunkGeometry = new THREE.BoxGeometry(1, treeHeight, 1);
+            const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x8B4513 });
+            const trunkMesh = new THREE.Mesh(trunkGeometry, trunkMaterial);
+            trunkMesh.position.set(x, treeHeight / 2, z);
+            trunkMesh.castShadow = true;
+            scene.add(trunkMesh);
+            
+            // 葉を作成（単一のジオメトリとして）
+            const leafGeometry = new THREE.BoxGeometry(leafSize, leafSize, leafSize);
+            const leafMaterial = new THREE.MeshStandardMaterial({ color: 0x228B22 });
+            const leafMesh = new THREE.Mesh(leafGeometry, leafMaterial);
+            leafMesh.position.set(x, treeHeight + leafSize/2 - 1, z);
+            leafMesh.castShadow = true;
+            scene.add(leafMesh);
+            
+            // 物理ボディは1つだけ作成し、簡略化（静的オブジェクトなので詳細な当たり判定は不要）
+            const treeShape = new CANNON.Box(new CANNON.Vec3(leafSize / 2, treeHeight, leafSize / 2));
+            const treeBody = new CANNON.Body({ mass: 0, material: groundMaterial });
+            treeBody.position.set(x, treeHeight / 2, z);
+            treeBody.addShape(treeShape);
+            world.addBody(treeBody);
+            
+            // LOD管理対象に追加
+            const treeGroup = new THREE.Group();
+            treeGroup.add(trunkMesh);
+            treeGroup.add(leafMesh);
+            
+            dynamicObjects.push({
+                mesh: treeGroup,
+                meshes: [trunkMesh, leafMesh],
+                body: treeBody,
+                type: 'tree',
+                position: new THREE.Vector3(x, 0, z),
+                originalScale: new THREE.Vector3(1, 1, 1)
+            });
+        }
+        
+        // 簡略化した雲の作成関数
+        function createSimpleCloud(x, y, z) {
+            // 単一のジオメトリで雲を表現
+            const cloudGeometry = new THREE.SphereGeometry(5, 8, 8);
+            const cloudMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 });
+            const cloudMesh = new THREE.Mesh(cloudGeometry, cloudMaterial);
+            cloudMesh.position.set(x, y, z);
+            scene.add(cloudMesh);
+            
+            // LOD管理対象に追加（雲は物理ボディを持たない）
+            dynamicObjects.push({
+                mesh: cloudMesh,
+                body: null,
+                type: 'cloud',
+                position: new THREE.Vector3(x, y, z),
+                originalScale: new THREE.Vector3(1, 1, 1)
+            });
+        }
+        
+        // 簡略化したボックス作成関数
+        function createBox(x, y, z, width, height, depth) {
+            const boxGeometry = new THREE.BoxGeometry(width, height, depth);
+            const boxMaterial = new THREE.MeshStandardMaterial({ 
+                color: Math.random() * 0xffffff, 
+                roughness: 0.7, 
+                metalness: 0.2 
+            });
+            const boxMesh = new THREE.Mesh(boxGeometry, boxMaterial);
+            boxMesh.position.set(x, y, z);
+            boxMesh.castShadow = true;
+            boxMesh.receiveShadow = true;
+            scene.add(boxMesh);
+            
+            // 物理ボディ
+            const halfExtents = new CANNON.Vec3(width / 2, height / 2, depth / 2);
+            const boxShape = new CANNON.Box(halfExtents);
+            const boxBody = new CANNON.Body({ mass: 0, material: groundMaterial });
+            boxBody.addShape(boxShape);
+            boxBody.position.set(x, y, z);
+            world.addBody(boxBody);
+            
+            // LOD管理対象に追加
+            dynamicObjects.push({
+                mesh: boxMesh,
+                body: boxBody,
+                type: 'box',
+                position: new THREE.Vector3(x, y, z),
+                originalScale: new THREE.Vector3(1, 1, 1)
+            });
+        }
+
+        // --- Create Player (Physics Body) --- (unchanged)
+        function createPlayer() { console.log("Creating player..."); const playerShape = new CANNON.Sphere(playerRadius); if (!playerMaterial) { console.error("Player material error!"); return; } playerBody = new CANNON.Body({ mass: playerMass, position: new CANNON.Vec3(0, 2, 5), shape: playerShape, material: playerMaterial, linearDamping: 0.7, angularDamping: 1.0, fixedRotation: true, collisionFilterGroup: playerCollisionGroup, collisionFilterMask: 1 | enemyCollisionGroup | ballCollisionGroup }); world.addBody(playerBody); console.log("Player created."); }
+
+        // --- Create Lights --- 
+        function createLights() { 
+            console.log("Creating lights..."); 
+            // アンビエントライトを明るくする
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.8); 
+            scene.add(ambientLight); 
+            
+            // 平行光源を明るくする
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2); 
+            directionalLight.position.set(30, 100, 40); 
+            directionalLight.castShadow = true; 
+            directionalLight.shadow.mapSize.width = 2048; 
+            directionalLight.shadow.mapSize.height = 2048; 
+            const shadowCamSize = 100; 
+            directionalLight.shadow.camera.top = shadowCamSize; 
+            directionalLight.shadow.camera.bottom = -shadowCamSize; 
+            directionalLight.shadow.camera.left = -shadowCamSize; 
+            directionalLight.shadow.camera.right = shadowCamSize; 
+            directionalLight.shadow.camera.near = 0.5; 
+            directionalLight.shadow.camera.far = 300; 
+            scene.add(directionalLight); 
+            console.log("Lights created."); 
+        }
+
+        // --- Shoot Ball Function ---
+        function shootBall() { 
+            if (!controls.isLocked) return; 
+            console.log("--- Shooting ball ---"); 
+            const ballMesh = new THREE.Mesh(ballGeometry, ballMeshMaterial); 
+            ballMesh.castShadow = true; 
+            ballMesh.receiveShadow = true; 
+            
+            if (!ballPhysicsMaterial) { 
+                console.warn("Ball physics material error!"); 
+                return; 
+            } 
+            
+            const ballBody = new CANNON.Body({ 
+                mass: 0.5, 
+                shape: ballShape, 
+                material: ballPhysicsMaterial, 
+                linearDamping: 0.1, 
+                angularDamping: 0.1, 
+                collisionFilterGroup: ballCollisionGroup, 
+                collisionFilterMask: 1 | playerCollisionGroup | enemyCollisionGroup | ballCollisionGroup 
+            }); 
+            
+            ballBody.addEventListener('collide', (event) => { 
+                const contact = event.contact; 
+                const otherBody = contact.bi.id === ballBody.id ? contact.bj : contact.bi; 
+                
+                if (otherBody.isEnemy) { 
+                    console.log("Ball hit enemy!"); 
+                    const enemyIndex = enemies.findIndex(e => e.body.id === otherBody.id); 
+                    
+                    if (enemyIndex !== -1) { 
+                        // 敵を削除
+                        world.removeBody(otherBody);
+                        scene.remove(enemies[enemyIndex].mesh);
+                        enemies.splice(enemyIndex, 1);
+                        
+                        const ballIndex = balls.findIndex(b => b.body === ballBody); 
+                        if (ballIndex !== -1) { 
+                            world.removeBody(ballBody); 
+                            scene.remove(ballMesh); 
+                            balls.splice(ballIndex, 1); 
+                        } 
+                    } else { 
+                        console.warn("Collided enemy not found?"); 
+                    } 
+                } 
+            });
+
+            const shootDirectionTHREE = new THREE.Vector3();
+            camera.getWorldDirection(shootDirectionTHREE);
+            const camPosTHREE = new THREE.Vector3();
+            camera.getWorldPosition(camPosTHREE);
+            const shootDirectionCANNON = new CANNON.Vec3(shootDirectionTHREE.x, shootDirectionTHREE.y, shootDirectionTHREE.z);
+            const camPosCANNON = new CANNON.Vec3(camPosTHREE.x, camPosTHREE.y, camPosTHREE.z);
+            const startOffsetDistance = 1.0;
+            const startOffsetCANNON = new CANNON.Vec3();
+            shootDirectionCANNON.scale(startOffsetDistance, startOffsetCANNON);
+            camPosCANNON.vadd(startOffsetCANNON, ballBody.position);
+            ballMesh.position.set(ballBody.position.x, ballBody.position.y, ballBody.position.z);
+            const shootVelocity = 35;
+            const upwardBias = 0.15;
+            shootDirectionCANNON.y += upwardBias;
+            shootDirectionCANNON.normalize();
+            shootDirectionCANNON.scale(shootVelocity, ballBody.velocity);
+            console.log("Ball Velocity:", ballBody.velocity.x.toFixed(2), ballBody.velocity.y.toFixed(2), ballBody.velocity.z.toFixed(2));
+            console.log("----------------------");
+            scene.add(ballMesh);
+            world.addBody(ballBody);
+            balls.push({ mesh: ballMesh, body: ballBody });
+            setTimeout(() => {
+                const index = balls.findIndex(b => b.body === ballBody);
+                if (index !== -1) {
+                    world.removeBody(ballBody);
+                    scene.remove(ballMesh);
+                    balls.splice(index, 1);
+                }
+            }, 8000);
+        }
+
+        // --- Create Enemy ---
+        function createEnemy(x, y, z) {
+            // サイズ設定
+            const eWidth = 1.5;
+            const eHeight = 1.5;
+            
+            // PlaneGeometryを使用
+            const eG = new THREE.PlaneGeometry(eWidth, eHeight);
+            const eMM = new THREE.MeshStandardMaterial({ 
+                map: enemyTexture,
+                transparent: true,
+                side: THREE.DoubleSide // 両面を表示
+            });
+            const eM = new THREE.Mesh(eG, eMM);
+            eM.position.set(x, y, z);
+            eM.castShadow = true;
+            
+            // ビルボードオブジェクトとして配列に追加
+            billboardObjects.push(eM);
+            
+            scene.add(eM);
+
+            // 物理ボディはボックスのまま（当たり判定用）
+            const eSh = new CANNON.Box(new CANNON.Vec3(eWidth / 2, eHeight / 2, 0.1));
+            const eB = new CANNON.Body({ 
+                mass: 20, 
+                material: enemyMaterial, 
+                linearDamping: 0.8, 
+                collisionFilterGroup: enemyCollisionGroup, 
+                collisionFilterMask: playerCollisionGroup | enemyCollisionGroup | ballCollisionGroup | 1 
+            });
+            eB.addShape(eSh);
+            eB.position.set(x, y, z);
+            eB.isEnemy = true;
+            world.addBody(eB);
+
+            const en = { mesh: eM, body: eB, health: 1 };
+            enemies.push(en);
+            console.log(`Enemy created at ${x}, ${y}, ${z}`);
+        }
+
+        // 羊のモデルを非同期に読み込む関数
+        function loadSheepModel(x, y, z) {
+            console.log(`Loading sheep model at ${x}, ${y}, ${z}...`);
+            
+            // デバッグ用：読み込むファイルのパスを表示
+            const modelPath = 'assets/images/hitsuji.glb';
+            console.log(`Attempting to load model from: ${modelPath}`);
+            
+            try {
+                gltfLoader.load(
+                    modelPath,
+                    function(gltf) {
+                        console.log('Model loaded successfully');
+                        const model = gltf.scene;
+                        
+                        // モデルのサイズ調整
+                        model.scale.set(1.5, 1.5, 1.5);
+                        
+                        // 位置設定
+                        model.position.set(x, y, z);
+                        
+                        // 影の設定
+                        model.traverse(function(node) {
+                            if (node.isMesh) {
+                                node.castShadow = true;
+                                node.receiveShadow = true;
+                            }
+                        });
+                        
+                        // シーンに追加
+                        scene.add(model);
+                        
+                        // モデルを保存
+                        sheepModel = model;
+                        assetsToLoad.sheepModel = true;
+                        
+                        console.log(`Sheep model loaded at ${x}, ${y}, ${z}`);
+                    },
+                    function(xhr) {
+                        // 進捗状況のログを詳細に
+                        if (xhr.lengthComputable) {
+                            const percentComplete = xhr.loaded / xhr.total * 100;
+                            console.log(`Loading sheep model: ${percentComplete.toFixed(2)}% loaded`);
+                        } else {
+                            console.log(`Loading sheep model: ${xhr.loaded} bytes loaded`);
+                        }
+                    },
+                    function(error) {
+                        console.error('Error loading sheep model:', error);
+                        // エラーが発生した場合は代替として単純な箱を表示
+                        createFallbackSheep(x, y, z);
+                    }
+                );
+            } catch (e) {
+                console.error('Exception during model loading:', e);
+                // 例外が発生した場合も代替表示
+                createFallbackSheep(x, y, z);
+            }
+        }
+        
+        // モデル読み込みに失敗した場合の代替表示
+        function createFallbackSheep(x, y, z) {
+            console.log(`Creating fallback sheep at ${x}, ${y}, ${z}`);
+            
+            // 簡単な箱を羊の代わりに表示
+            const sheepGeometry = new THREE.BoxGeometry(1.5, 1.5, 1.5);
+            const sheepMaterial = new THREE.MeshStandardMaterial({ color: 0xFFFFFF });
+            const sheepMesh = new THREE.Mesh(sheepGeometry, sheepMaterial);
+            
+            sheepMesh.position.set(x, y + 0.75, z);
+            sheepMesh.castShadow = true;
+            sheepMesh.receiveShadow = true;
+            
+            scene.add(sheepMesh);
+            
+            // モデルを保存
+            sheepModel = sheepMesh;
+            assetsToLoad.sheepModel = true;
+        }
+
+        // LODとフラスタムカリングを実装した関数
+        function updateLODAndFrustumCulling() {
+            if (!camera) return;
+            
+            // カメラの位置を取得
+            const cameraPosition = new THREE.Vector3();
+            camera.getWorldPosition(cameraPosition);
+            
+            // フラスタムを更新
+            const frustum = new THREE.Frustum();
+            const projScreenMatrix = new THREE.Matrix4();
+            projScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+            frustum.setFromProjectionMatrix(projScreenMatrix);
+            
+            // 全ての動的オブジェクトをチェック
+            for (let i = 0; i < dynamicObjects.length; i++) {
+                const obj = dynamicObjects[i];
+                if (!obj.mesh) continue;
+                
+                // オブジェクトとカメラの距離を計算
+                const distance = cameraPosition.distanceTo(obj.position);
+                
+                // フラスタムカリング（視界外のオブジェクトは非表示）
+                // メッシュの存在とジオメトリ、boundingSphereの存在を確認
+                let isInFrustum = true;
+                if (obj.mesh && obj.mesh.geometry && obj.mesh.geometry.boundingSphere) {
+                    isInFrustum = frustum.intersectsObject(obj.mesh);
+                }
+                
+                if (distance > LOD_DISTANCE_FAR || !isInFrustum) {
+                    // 遠すぎるか視界外のオブジェクトは非表示
+                    if (obj.mesh.visible) {
+                        obj.mesh.visible = false;
+                        
+                        // 複数のメッシュを持つオブジェクト（木など）
+                        if (obj.meshes) {
+                            obj.meshes.forEach(mesh => {
+                                mesh.visible = false;
+                            });
+                        }
+                    }
+                } else {
+                    // 視界内のオブジェクトは表示
+                    if (!obj.mesh.visible) {
+                        obj.mesh.visible = true;
+                        
+                        // 複数のメッシュを持つオブジェクト
+                        if (obj.meshes) {
+                            obj.meshes.forEach(mesh => {
+                                mesh.visible = true;
+                            });
+                        }
+                    }
+                    
+                    // LOD（距離に応じた詳細度）
+                    if (distance > LOD_DISTANCE) {
+                        // 遠いオブジェクトは詳細度を下げる（スケールを小さくする）
+                        const scale = Math.max(0.5, 1 - (distance - LOD_DISTANCE) / (LOD_DISTANCE_FAR - LOD_DISTANCE));
+                        
+                        if (obj.type === 'cloud') {
+                            // 雲は特別な処理（透明度も変更）
+                            if (obj.mesh.material) {
+                                obj.mesh.material.opacity = Math.max(0.2, scale);
+                            }
+                        }
+                        
+                        // スケールを調整
+                        obj.mesh.scale.set(
+                            obj.originalScale.x * scale,
+                            obj.originalScale.y * scale,
+                            obj.originalScale.z * scale
+                        );
+                    } else {
+                        // 近いオブジェクトは通常のスケール
+                        obj.mesh.scale.copy(obj.originalScale);
+                        
+                        if (obj.type === 'cloud' && obj.mesh.material) {
+                            obj.mesh.material.opacity = 0.8;
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Animation Loop ---
+        let lastCallTime = performance.now();
+        const raycastOptions = { collisionFilterGroup: 1, collisionFilterMask: 1, skipBackfaces: true };
+        const groundCheckResult = new CANNON.RaycastResult();
+        const enemyTargetDirection = new CANNON.Vec3();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            // controls の存在チェックを追加
+            if (controls && controls.isLocked && playerBody) {
+                // 物理演算の更新頻度を下げる
+                physicsUpdateCounter++;
+                if (physicsUpdateCounter >= physicsUpdateFrequency) {
+                    world.step(timeStep * physicsUpdateFrequency);
+                    physicsUpdateCounter = 0;
+                    
+                    // Ground Check
+                    const rayFrom = playerBody.position; 
+                    const rayTo = new CANNON.Vec3(rayFrom.x, rayFrom.y - playerRadius - 0.1, rayFrom.z);
+                    groundCheckResult.reset(); 
+                    world.raycastClosest(rayFrom, rayTo, raycastOptions, groundCheckResult);
+                    if (groundCheckResult.hasHit && groundCheckResult.body.material === groundMaterial) { 
+                        canJump = true; 
+                    } else { 
+                        canJump = false; 
+                    }
+                }
+
+                // Player Movement（毎フレーム実行）
+                const inputVelocity = new THREE.Vector3(); 
+                const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+                euler.setFromQuaternion(camera.quaternion);
+                if (moveForward) inputVelocity.z = -1; 
+                if (moveBackward) inputVelocity.z = 1;
+                if (moveLeft) inputVelocity.x = -1; 
+                if (moveRight) inputVelocity.x = 1;
+
+                if (inputVelocity.lengthSq() > 0) { // If there is input
+                    inputVelocity.normalize(); 
+                    inputVelocity.applyEuler(euler);
+                    playerBody.velocity.x = inputVelocity.x * moveSpeed;
+                    playerBody.velocity.z = inputVelocity.z * moveSpeed;
+                } else { // If there is NO input, apply explicit damping
+                    const dampFactor = 0.8;
+                    playerBody.velocity.x *= dampFactor;
+                    playerBody.velocity.z *= dampFactor;
+                }
+
+                // Enemy AI - 最適化（物理更新と同じタイミングで実行）
+                if (physicsUpdateCounter === 0) {
+                    for (let i = 0; i < enemies.length; i++) {
+                        const enemy = enemies[i];
+                        if (enemy.body && playerBody) {
+                            playerBody.position.vsub(enemy.body.position, enemyTargetDirection);
+                            enemyTargetDirection.y = 0;
+                            if (enemyTargetDirection.lengthSquared() > 0.1) {
+                                enemyTargetDirection.normalize();
+                                enemy.body.velocity.x = enemyTargetDirection.x * enemySpeed;
+                                enemy.body.velocity.z = enemyTargetDirection.z * enemySpeed;
+                            }
+                        }
+                    }
+                }
+
+                // Sync camera position（毎フレーム実行）
+                camera.position.copy(playerBody.position);
+                camera.position.y += playerHeight * 0.8;
+            }
+
+            // Sync Meshes - 物理更新と同じタイミングで実行
+            if (physicsUpdateCounter === 0) {
+                for (let i = 0; i < balls.length; i++) {
+                    const ball = balls[i];
+                    if (ball.mesh && ball.body) {
+                        ball.mesh.position.set(
+                            ball.body.position.x,
+                            ball.body.position.y,
+                            ball.body.position.z
+                        );
+                        ball.mesh.quaternion.set(
+                            ball.body.quaternion.x,
+                            ball.body.quaternion.y,
+                            ball.body.quaternion.z,
+                            ball.body.quaternion.w
+                        );
+                    }
+                }
+                
+                for (let i = 0; i < enemies.length; i++) {
+                    const enemy = enemies[i];
+                    if (enemy.mesh && enemy.body) {
+                        enemy.mesh.position.set(
+                            enemy.body.position.x,
+                            enemy.body.position.y,
+                            enemy.body.position.z
+                        );
+                    }
+                }
+            }
+
+            // ビルボード処理を実行（最適化版）- 毎フレーム実行
+            updateBillboards();
+            
+            // LODとフラスタムカリングを更新（毎フレーム実行）
+            updateLODAndFrustumCulling();
+
+            renderer.render(scene, camera);
+        }
+
+        // --- Event Handlers --- (unchanged)
+        function onWindowResize() { if (camera && renderer) { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); } }
+        function onKeyDown(event) { if (!controls.isLocked || !playerBody) return; switch (event.code) { case 'KeyW': case 'ArrowUp': moveForward = true; break; case 'KeyA': case 'ArrowLeft': moveLeft = true; break; case 'KeyS': case 'ArrowDown': moveBackward = true; break; case 'KeyD': case 'ArrowRight': moveRight = true; break; case 'Space': if (canJump) { console.log("Jump Key!"); playerBody.velocity.y = jumpVelocity; canJump = false; } break; } }
+        function onKeyUp(event) { if (!controls.isLocked) return; switch (event.code) { case 'KeyW': case 'ArrowUp': moveForward = false; break; case 'KeyA': case 'ArrowLeft': moveLeft = false; break; case 'KeyS': case 'ArrowDown': moveBackward = false; break; case 'KeyD': case 'ArrowRight': moveRight = false; break; } }
+        function onPointerDown(event) { if (controls.isLocked && event.button === 0) { shootBall(); } }
+        function displayError(message) { console.error(message); const errorElement = document.createElement('div'); errorElement.style.position = 'fixed'; errorElement.style.top = '50%'; errorElement.style.left = '50%'; errorElement.style.transform = 'translate(-50%, -50%)'; errorElement.style.backgroundColor = 'rgba(255, 0, 0, 0.8)'; errorElement.style.color = 'white'; errorElement.style.padding = '20px'; errorElement.style.borderRadius = '10px'; errorElement.style.fontFamily = 'Arial, sans-serif'; errorElement.style.zIndex = '1000'; errorElement.textContent = `エラー: ${message}`; document.body.appendChild(errorElement); }
+        
+        // ビルボード処理を行う関数（最適化版）
+        function updateBillboards() {
+            // シーン全体をトラバースする代わりに、ビルボードオブジェクトの配列だけを処理
+            for (let i = 0; i < billboardObjects.length; i++) {
+                billboardObjects[i].quaternion.copy(camera.quaternion);
+            }
+        }
+        
+        // --- Initialize ---
+        init();
+    </script>
+</body>
+</html>
